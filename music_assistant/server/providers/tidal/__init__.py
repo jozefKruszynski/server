@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tidalapi import Session as TidalSession
 
@@ -180,42 +180,42 @@ class TidalProvider(MusicProvider):
         parsed_results = SearchResults()
         if results["artists"]:
             for artist in results["artists"]:
-                parsed_results.artists.append(await parse_artist(artist))
+                parsed_results.artists.append(await parse_artist(self, artist))
         if results["albums"]:
             for album in results["albums"]:
-                parsed_results.albums.append(await parse_album(album))
+                parsed_results.albums.append(await parse_album(self, album))
         if results["playlists"]:
             for playlist in results["playlists"]:
-                parsed_results.playlists.append(await parse_playlist(playlist))
+                parsed_results.playlists.append(await parse_playlist(self, playlist))
         if results["tracks"]:
             for track in results["tracks"]:
-                parsed_results.tracks.append(await parse_track(track))
+                parsed_results.tracks.append(await parse_track(self, track))
         return parsed_results
 
     async def get_library_artists(self) -> AsyncGenerator[Artist, None]:
         """Retrieve all library artists from Tidal."""
         artists_obj = await get_library_artists(self, self._tidal_user_id)
         for artist in artists_obj:
-            yield parse_artist(tidal_provider=self, artist_obj=artist)
+            yield await parse_artist(tidal_provider=self, artist_obj=artist)
 
     async def get_library_albums(self) -> AsyncGenerator[Album, None]:
         """Retrieve all library albums from Tidal."""
         albums_obj = await get_library_albums(self, self._tidal_user_id)
         for album in albums_obj:
-            yield parse_album(tidal_provider=self, album_obj=album)
+            yield await parse_album(tidal_provider=self, album_obj=album)
 
     async def get_library_tracks(self) -> AsyncGenerator[Track, None]:
         """Retrieve library tracks from Tidal."""
         tracks_obj = await get_library_tracks(self, self._tidal_user_id)
         for track in tracks_obj:
             if track.available:
-                yield parse_track(tidal_provider=self, track_obj=track)
+                yield await parse_track(tidal_provider=self, track_obj=track)
 
     async def get_library_playlists(self) -> AsyncGenerator[Playlist, None]:
         """Retrieve all library playlists from the provider."""
         playlists_obj = await get_library_playlists(self, self._tidal_user_id)
         for playlist in playlists_obj:
-            yield parse_playlist(tidal_provider=self, playlist_obj=playlist)
+            yield await parse_playlist(tidal_provider=self, playlist_obj=playlist)
 
     async def get_album_tracks(self, prov_album_id: str) -> list[Track]:
         """Get album tracks for given album id."""
@@ -223,7 +223,7 @@ class TidalProvider(MusicProvider):
         tracks = await get_album_tracks(self, prov_album_id)
         for index, track_obj in enumerate(tracks, 1):
             if track_obj.available:
-                track = parse_track(tidal_provider=self, track_obj=track_obj)
+                track = await parse_track(tidal_provider=self, track_obj=track_obj)
                 track.position = index
                 result.append(track)
         return result
@@ -233,7 +233,7 @@ class TidalProvider(MusicProvider):
         result = []
         albums = await get_artist_albums(self, prov_artist_id)
         for album_obj in albums:
-            album = parse_album(tidal_provider=self, album_obj=album_obj)
+            album = await parse_album(tidal_provider=self, album_obj=album_obj)
             result.append(album)
         return result
 
@@ -243,7 +243,7 @@ class TidalProvider(MusicProvider):
         tracks = await get_artist_toptracks(self, prov_artist_id)
         for index, track_obj in enumerate(tracks, 1):
             if track_obj.available:
-                track = parse_track(tidal_provider=self, track_obj=track_obj)
+                track = await parse_track(tidal_provider=self, track_obj=track_obj)
                 track.position = index
                 result.append(track)
         return result
@@ -251,11 +251,25 @@ class TidalProvider(MusicProvider):
     async def get_playlist_tracks(self, prov_playlist_id) -> AsyncGenerator[Track, None]:
         """Get all playlist tracks for given playlist id."""
         tracks = await get_playlist_tracks(self, prov_playlist_id=prov_playlist_id)
-        for index, track_obj in enumerate(tracks):
-            if track_obj.available:
-                track = parse_track(tidal_provider=self, track_obj=track_obj)
-                track.position = index + 1
-                yield track
+        if len(tracks) > 250:
+            track_chunks = self.get_playlist_track_chunks(tracks)
+            async for chunk in track_chunks:
+                for index, track_obj in enumerate(chunk):
+                    if track_obj.available:
+                        track = await parse_track(tidal_provider=self, track_obj=track_obj)
+                        track.position = index + 1
+                        yield track
+        else:
+            for index, track_obj in enumerate(tracks):
+                if track_obj.available:
+                    track = await parse_track(tidal_provider=self, track_obj=track_obj)
+                    track.position = index + 1
+                    yield track
+
+    async def get_playlist_track_chunks(self, tracks) -> AsyncGenerator[list[Any], None]:
+        """Get playlist track chunks."""
+        for i in range(0, len(tracks), 250):
+            yield tracks[i : i + 250]
 
     async def get_similar_tracks(self, prov_track_id, limit=25) -> list[Track]:
         """Get similar tracks for given track id."""
@@ -263,7 +277,7 @@ class TidalProvider(MusicProvider):
         tracks = []
         for track_obj in similar_tracks_obj:
             if track_obj.available:
-                track = parse_track(tidal_provider=self, track_obj=track_obj)
+                track = await parse_track(tidal_provider=self, track_obj=track_obj)
                 tracks.append(track)
         return tracks
 
@@ -289,9 +303,7 @@ class TidalProvider(MusicProvider):
 
     async def add_playlist_tracks(self, prov_playlist_id: str, prov_track_ids: list[str]):
         """Add track(s) to playlist."""
-        return await add_remove_playlist_tracks(
-            self._tidal_session, prov_playlist_id, prov_track_ids, add=True
-        )
+        return await add_remove_playlist_tracks(self, prov_playlist_id, prov_track_ids, add=True)
 
     async def remove_playlist_tracks(
         self, prov_playlist_id: str, positions_to_remove: tuple[int, ...]
@@ -308,7 +320,7 @@ class TidalProvider(MusicProvider):
     async def create_playlist(self, name: str) -> Playlist:
         """Create a new playlist on provider with given name."""
         playlist_obj = await create_playlist(self, self._tidal_user_id, name)
-        playlist = parse_playlist(tidal_provider=self, playlist_obj=playlist_obj)
+        playlist = await parse_playlist(tidal_provider=self, playlist_obj=playlist_obj)
         return await self.mass.music.playlists.add_db_item(playlist)
 
     async def get_stream_details(self, item_id: str) -> StreamDetails:
@@ -333,7 +345,7 @@ class TidalProvider(MusicProvider):
     async def get_artist(self, prov_artist_id: str) -> Artist:
         """Get artist details for given artist id."""
         try:
-            artist = parse_artist(
+            artist = await parse_artist(
                 tidal_provider=self,
                 artist_obj=await get_artist(self, prov_artist_id),
             )
@@ -344,7 +356,7 @@ class TidalProvider(MusicProvider):
     async def get_album(self, prov_album_id: str) -> Album:
         """Get album details for given album id."""
         try:
-            album = parse_album(
+            album = await parse_album(
                 tidal_provider=self,
                 album_obj=await get_album(self, prov_album_id),
             )
@@ -355,7 +367,7 @@ class TidalProvider(MusicProvider):
     async def get_track(self, prov_track_id: str) -> Track:
         """Get track details for given track id."""
         try:
-            track = parse_track(
+            track = await parse_track(
                 tidal_provider=self,
                 track_obj=await get_track(self, prov_track_id),
             )
@@ -366,7 +378,7 @@ class TidalProvider(MusicProvider):
     async def get_playlist(self, prov_playlist_id: str) -> Playlist:
         """Get playlist details for given playlist id."""
         try:
-            playlist = parse_playlist(
+            playlist = await parse_playlist(
                 tidal_provider=self,
                 playlist_obj=await get_playlist(self, prov_playlist_id),
             )
